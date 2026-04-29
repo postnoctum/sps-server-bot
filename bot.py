@@ -256,23 +256,24 @@ async def view_schedule(ctx):
         if not pairs:
             return await ctx.reply("📅 No upcoming scheduled windows.")
 
-        lines = ["**📅 Upcoming Server Schedule (EST)**"]
-        for label, p in sorted(pairs.items()):
-            start_s = p.get("start")
-            stop_s  = p.get("stop")
-            start_str = f"Start: `{label}`" if not start_s else ""
-            # Parse UTC time back to EST for display
-            def fmt(s):
-                expr = s.get("ScheduleExpression", "")
-                # at(2026-05-10T22:00:00)
+        def fmt_from_name(name):
+            try:
+                detail = get_scheduler_client().get_schedule(Name=name)
+                expr = detail.get("ScheduleExpression", "")
                 m = re.search(r'at\((.+?)\)', expr)
                 if m:
                     dt = datetime.fromisoformat(m.group(1)).replace(tzinfo=ZoneInfo("UTC")).astimezone(EST)
                     return dt.strftime("%a %b %d, %I:%M %p EST")
-                return "unknown"
+            except Exception:
+                pass
+            return "unknown"
 
-            start_str = fmt(start_s) if start_s else "—"
-            stop_str  = fmt(stop_s)  if stop_s  else "—"
+        lines = ["**📅 Upcoming Server Schedule (EST)**"]
+        for label, p in sorted(pairs.items()):
+            start_name = make_schedule_name(label, "start")
+            stop_name  = make_schedule_name(label, "stop")
+            start_str  = fmt_from_name(start_name) if p.get("start") else "—"
+            stop_str   = fmt_from_name(stop_name)  if p.get("stop")  else "—"
             lines.append(f"`{label}` ▶️ {start_str} → ⏹️ {stop_str}")
 
         await ctx.reply("\n".join(lines))
