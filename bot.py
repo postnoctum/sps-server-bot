@@ -315,9 +315,23 @@ async def view_schedule(ctx):
 async def poll(ctx, *, question: str):
     if not has_role(ctx, SPS_TEAM_ROLE):
         return
-    msg = await ctx.send(f"📊 **{question}**\nReact with ✅ or ❌")
-    await msg.add_reaction("✅")
-    await msg.add_reaction("❌")
+    parts = [p.strip() for p in question.split("|")]
+    if len(parts) == 1:
+        msg = await ctx.send(f"📊 **{parts[0]}**\nReact with ✅ or ❌")
+        await msg.add_reaction("✅")
+        await msg.add_reaction("❌")
+    else:
+        question_text = parts[0]
+        options = parts[1:]
+        number_emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣"]
+        if len(options) > 9:
+            return await ctx.reply("⚠️ Maximum 9 options allowed.")
+        lines = [f"📊 **{question_text}**"]
+        for i, opt in enumerate(options):
+            lines.append(f"{number_emojis[i]} {opt}")
+        msg = await ctx.send("\n".join(lines))
+        for i in range(len(options)):
+            await msg.add_reaction(number_emojis[i])
 
 
 @bot.command(name="ask")
