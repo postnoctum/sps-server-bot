@@ -293,7 +293,7 @@ async def poll(ctx, *, question: str):
     await msg.add_reaction("❌")
 
 
-@bot.command(name="help")
+@bot.command(name="spshelp")
 async def help_command(ctx):
     roles = user_roles(ctx)
     intro = (
@@ -310,7 +310,7 @@ async def help_command(ctx):
         "`!roll [sides]` — Roll a dice\n"
         "`!flip` — Flip a coin\n"
         "`!gg <user>` — Good game shoutout\n"
-        "`!help` — Show this message"
+        "`!spshelp` — Show this message"
     )
 
     # SPS Team
