@@ -146,7 +146,7 @@ async def ask_claude(question: str) -> str:
         "messages": [{"role": "user", "content": question}]
     })
     response = client.invoke_model(
-        modelId="anthropic.claude-haiku-4-5",
+        modelId="us.anthropic.claude-haiku-4-5-20251001-v1:0",
         body=body,
         contentType="application/json",
         accept="application/json",
@@ -321,9 +321,11 @@ async def poll(ctx, *, question: str):
 
 
 @bot.command(name="ask")
-async def ask_command(ctx, *, question: str):
+async def ask_command(ctx, *, question: str = None):
     if not has_role(ctx, SPS_TEAM_ROLE):
         return
+    if not question:
+        return await ctx.reply("❓ Please include a question. Example: `!ask what is Star Atlas?`")
     async with ctx.typing():
         try:
             import json
@@ -336,7 +338,7 @@ async def ask_command(ctx, *, question: str):
             })
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(None, lambda: client.invoke_model(
-                modelId="anthropic.claude-haiku-4-5",
+                modelId="us.anthropic.claude-haiku-4-5-20251001-v1:0",
                 body=body,
                 contentType="application/json",
                 accept="application/json",
