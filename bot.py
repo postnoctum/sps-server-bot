@@ -127,6 +127,33 @@ def get_autostop_time() -> datetime | None:
         pass
     return None
 
+# ── Bedrock AI ───────────────────────────────────────────────────────────────
+
+def get_bedrock_client():
+    return boto3.client(
+        "bedrock-runtime",
+        region_name=AWS_REGION,
+        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    )
+
+async def ask_claude(question: str) -> str:
+    import json
+    client = get_bedrock_client()
+    body = json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": question}]
+    })
+    response = client.invoke_model(
+        modelId="anthropic.claude-haiku-4-5",
+        body=body,
+        contentType="application/json",
+        accept="application/json",
+    )
+    result = json.loads(response["body"].read())
+    return result["content"][0]["text"]
+
 # ── YouTube ───────────────────────────────────────────────────────────────────
 
 async def check_youtube_live(channel_url: str) -> dict:
@@ -293,6 +320,37 @@ async def poll(ctx, *, question: str):
     await msg.add_reaction("❌")
 
 
+@bot.command(name="ask")
+async def ask_command(ctx, *, question: str):
+    if not has_role(ctx, SPS_TEAM_ROLE):
+        return
+    async with ctx.typing():
+        try:
+            import json
+            client = get_bedrock_client()
+            body = json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 1024,
+                "system": "You are a helpful assistant for Super Phoenix Sports, a Web3 games tournament and streaming platform that holds weekly tournaments within the Star Atlas universe, covering multiple game modes. You are running as a Discord bot to help crew and community members with quick questions during live events and tournaments. Keep responses concise and clear.",
+                "messages": [{"role": "user", "content": question}]
+            })
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, lambda: client.invoke_model(
+                modelId="anthropic.claude-haiku-4-5",
+                body=body,
+                contentType="application/json",
+                accept="application/json",
+            ))
+            result = json.loads(response["body"].read())
+            answer = result["content"][0]["text"]
+            # Discord has a 2000 char limit
+            if len(answer) > 1900:
+                answer = answer[:1900] + "...(truncated)"
+            await ctx.reply(f"🤖 {answer}")
+        except Exception as e:
+            await ctx.reply(f"❌ Error: `{e}`")
+
+
 @bot.command(name="spshelp")
 async def help_command(ctx):
     roles = user_roles(ctx)
@@ -320,7 +378,8 @@ async def help_command(ctx):
             "`!serverstatus` — Check if server is running\n"
             "`!streamstatus` — Check if stream is live\n"
             "`!viewschedule` — View upcoming server schedule\n"
-            "`!poll <question>` — Create a reaction poll"
+            "`!poll <question>` — Create a reaction poll\n"
+        "`!ask <question>` — Ask the AI anything"
         )
 
     # EC2User
