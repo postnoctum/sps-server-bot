@@ -5,6 +5,7 @@ import asyncio
 import os
 import aiohttp
 import re
+import random
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -21,15 +22,16 @@ SCHEDULER_ROLE_ARN  = os.getenv("SCHEDULER_ROLE_ARN", "arn:aws:iam::853027285668
 TEAM_CHAT_CHANNEL     = "team-chat"
 STREAMERGENCY_CHANNEL = "streamergency"
 
+SPS_TEAM_ROLE  = "SPS Team"
 EC2USER_ROLE   = os.getenv("START_ROLE", "EC2User")
 EC2ADMIN_ROLE  = os.getenv("STOP_ROLE", "EC2Admin")
 BOTNOTIFY_ROLE = "BotNotify"
 
 EST = ZoneInfo("America/New_York")
+AUTOSTOP_NAME = "sps-autostop"
 
-# Runtime state (session only)
+# Runtime state
 server_start_time = None
-auto_stop_task    = None
 # ─────────────────────────────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
@@ -66,44 +68,16 @@ def get_instance_state() -> dict:
 # ── EventBridge Scheduler ─────────────────────────────────────────────────────
 
 def make_schedule_name(label: str, action: str) -> str:
-    """e.g. sps-start-20260510-1800, sps-stop-20260510-2300"""
     return f"sps-{action}-{label}"
 
-def create_ec2_schedule(name: str, dt: datetime, action: str):
-    """Create a one-time EventBridge schedule to start or stop the EC2."""
-    scheduler = get_scheduler_client()
-    ec2_action = "StartInstances" if action == "start" else "StopInstances"
-    # Convert to UTC for EventBridge
-    dt_utc = dt.astimezone(ZoneInfo("UTC"))
-    schedule_expr = f"at({dt_utc.strftime('%Y-%m-%dT%H:%M:%S')})"
-
-    scheduler.create_schedule(
-        Name=name,
-        ScheduleExpression=schedule_expr,
-        ScheduleExpressionTimezone="UTC",
-        FlexibleTimeWindow={"Mode": "OFF"},
-        Target={
-            "Arn": f"arn:aws:ec2:{AWS_REGION}::instance/{EC2_INSTANCE_ID}",
-            "RoleArn": SCHEDULER_ROLE_ARN,
-            "Input": "{}",
-            "EcsParameters": None,
-            "Arn": f"arn:aws:ssm:{AWS_REGION}::automation-definition/AWS-StartEC2Instance:$DEFAULT" if action == "start"
-                   else f"arn:aws:ssm:{AWS_REGION}::automation-definition/AWS-StopEC2Instance:$DEFAULT",
-            "RoleArn": SCHEDULER_ROLE_ARN,
-            "Input": f'{{"InstanceId":["{EC2_INSTANCE_ID}"]}}',
-        },
-        ActionAfterCompletion="DELETE",
-    )
-
 def create_ec2_schedule_v2(name: str, dt: datetime, action: str):
-    """Create schedule using EC2 API directly via EventBridge."""
     scheduler = get_scheduler_client()
     dt_utc = dt.astimezone(ZoneInfo("UTC"))
     schedule_expr = f"at({dt_utc.strftime('%Y-%m-%dT%H:%M:%S')})"
     ec2_action_arn = (
-        f"arn:aws:scheduler:::aws-sdk:ec2:startInstances"
+        "arn:aws:scheduler:::aws-sdk:ec2:startInstances"
         if action == "start"
-        else f"arn:aws:scheduler:::aws-sdk:ec2:stopInstances"
+        else "arn:aws:scheduler:::aws-sdk:ec2:stopInstances"
     )
     scheduler.create_schedule(
         Name=name,
@@ -129,6 +103,30 @@ def list_sps_schedules() -> list:
     resp = scheduler.list_schedules(NamePrefix="sps-")
     return resp.get("Schedules", [])
 
+def create_autostop_schedule(stop_dt: datetime):
+    try:
+        get_scheduler_client().delete_schedule(Name=AUTOSTOP_NAME)
+    except Exception:
+        pass
+    create_ec2_schedule_v2(AUTOSTOP_NAME, stop_dt, "stop")
+
+def delete_autostop_schedule():
+    try:
+        get_scheduler_client().delete_schedule(Name=AUTOSTOP_NAME)
+    except Exception:
+        pass
+
+def get_autostop_time() -> datetime | None:
+    try:
+        detail = get_scheduler_client().get_schedule(Name=AUTOSTOP_NAME)
+        expr = detail.get("ScheduleExpression", "")
+        m = re.search(r'at\((.+?)\)', expr)
+        if m:
+            return datetime.fromisoformat(m.group(1)).replace(tzinfo=ZoneInfo("UTC")).astimezone(EST)
+    except Exception:
+        pass
+    return None
+
 # ── YouTube ───────────────────────────────────────────────────────────────────
 
 async def check_youtube_live(channel_url: str) -> dict:
@@ -151,6 +149,9 @@ def has_role(ctx, role_name):
     if not role_name:
         return True
     return any(r.name == role_name for r in ctx.author.roles)
+
+def user_roles(ctx):
+    return {r.name for r in ctx.author.roles}
 
 async def get_channel_by_name(name):
     for guild in bot.guilds:
@@ -177,25 +178,17 @@ def format_duration(seconds):
         return f"{h}h {m}m"
     return f"{m}m {s}s"
 
-# ── Auto-stop (for manual !startserver) ──────────────────────────────────────
-
-async def schedule_auto_stop_local(stop_dt: datetime):
-    global auto_stop_task
-    if auto_stop_task:
-        auto_stop_task.cancel()
-    auto_stop_task = asyncio.create_task(_auto_stop_local(stop_dt))
-
-async def _auto_stop_local(stop_dt: datetime):
-    delay = (stop_dt - datetime.now(EST)).total_seconds()
-    if delay > 0:
-        await asyncio.sleep(delay)
+def fmt_schedule_time(name):
     try:
-        info = get_instance_state()
-        if info["state"] == "running":
-            get_ec2_client().stop_instances(InstanceIds=[EC2_INSTANCE_ID])
-            await post_to_team_chat("🛑 Server auto-stopped (6-hour limit reached).")
-    except Exception as e:
-        await post_to_team_chat(f"⚠️ Auto-stop failed: `{e}`")
+        detail = get_scheduler_client().get_schedule(Name=name)
+        expr = detail.get("ScheduleExpression", "")
+        m = re.search(r'at\((.+?)\)', expr)
+        if m:
+            dt = datetime.fromisoformat(m.group(1)).replace(tzinfo=ZoneInfo("UTC")).astimezone(EST)
+            return dt.strftime("%a %b %d, %I:%M %p EST")
+    except Exception:
+        pass
+    return "unknown"
 
 # ── Events ────────────────────────────────────────────────────────────────────
 
@@ -206,8 +199,27 @@ async def on_ready():
 
 # ── Commands: Everyone ────────────────────────────────────────────────────────
 
+@bot.command(name="roll")
+async def roll_dice(ctx, sides: int = 6):
+    result = random.randint(1, sides)
+    await ctx.reply(f"🎲 Rolled a d{sides}: **{result}**")
+
+@bot.command(name="flip")
+async def coin_flip(ctx):
+    result = random.choice(["Heads", "Tails"])
+    emoji  = "🟡" if result == "Heads" else "⚫"
+    await ctx.reply(f"{emoji} **{result}!**")
+
+@bot.command(name="gg")
+async def good_game(ctx, *, user: str):
+    await ctx.send(f"🏆 **GG {user}!** Well played! 👏")
+
+# ── Commands: SPS Team ────────────────────────────────────────────────────────
+
 @bot.command(name="serverstatus")
 async def server_status(ctx):
+    if not has_role(ctx, SPS_TEAM_ROLE):
+        return
     try:
         info = get_instance_state()
         state = info["state"]
@@ -219,6 +231,8 @@ async def server_status(ctx):
 
 @bot.command(name="streamstatus")
 async def stream_status(ctx):
+    if not has_role(ctx, SPS_TEAM_ROLE):
+        return
     if not YOUTUBE_CHANNEL_URL:
         return await ctx.reply("⚠️ YouTube channel is not configured.")
     await ctx.reply("🔍 Checking stream status...")
@@ -235,16 +249,19 @@ async def stream_status(ctx):
 
 @bot.command(name="viewschedule")
 async def view_schedule(ctx):
+    if not has_role(ctx, SPS_TEAM_ROLE):
+        return
     try:
         schedules = list_sps_schedules()
+        # Filter out autostop — it's shown in !timeuntilstop
+        schedules = [s for s in schedules if not s["Name"].startswith("sps-autostop")]
         if not schedules:
             return await ctx.reply("📅 No upcoming scheduled windows.")
 
-        # Pair up start/stop by their label
         pairs = {}
         for s in schedules:
-            name = s["Name"]  # e.g. sps-start-20260510-1800
-            parts = name.split("-", 2)  # ['sps', 'start'/'stop', 'label']
+            name  = s["Name"]
+            parts = name.split("-", 2)
             if len(parts) < 3:
                 continue
             action = parts[1]
@@ -256,24 +273,10 @@ async def view_schedule(ctx):
         if not pairs:
             return await ctx.reply("📅 No upcoming scheduled windows.")
 
-        def fmt_from_name(name):
-            try:
-                detail = get_scheduler_client().get_schedule(Name=name)
-                expr = detail.get("ScheduleExpression", "")
-                m = re.search(r'at\((.+?)\)', expr)
-                if m:
-                    dt = datetime.fromisoformat(m.group(1)).replace(tzinfo=ZoneInfo("UTC")).astimezone(EST)
-                    return dt.strftime("%a %b %d, %I:%M %p EST")
-            except Exception:
-                pass
-            return "unknown"
-
         lines = ["**📅 Upcoming Server Schedule (EST)**"]
         for label, p in sorted(pairs.items()):
-            start_name = make_schedule_name(label, "start")
-            stop_name  = make_schedule_name(label, "stop")
-            start_str  = fmt_from_name(start_name) if p.get("start") else "—"
-            stop_str   = fmt_from_name(stop_name)  if p.get("stop")  else "—"
+            start_str = fmt_schedule_time(make_schedule_name(label, "start")) if p.get("start") else "—"
+            stop_str  = fmt_schedule_time(make_schedule_name(label, "stop"))  if p.get("stop")  else "—"
             lines.append(f"`{label}` ▶️ {start_str} → ⏹️ {stop_str}")
 
         await ctx.reply("\n".join(lines))
@@ -281,30 +284,75 @@ async def view_schedule(ctx):
         await ctx.reply(f"❌ Error: `{e}`")
 
 
-@bot.command(name="serverhelp")
-async def server_help(ctx):
-    await ctx.reply(
-        "**🖥️ SPS Server Bot Commands**\n\n"
-        "**Everyone**\n"
-        "`!serverstatus` — Check if server is running\n"
-        "`!streamstatus` — Check if YouTube stream is live\n"
-        "`!viewschedule` — View upcoming server schedule\n"
-        "`!serverhelp`   — Show this message\n\n"
-        "**EC2User**\n"
-        "`!startserver`  — Start the server (auto-stops in 6h)\n\n"
-        "**EC2Admin**\n"
-        "`!stopserver`   — Stop the server immediately\n"
-        "`!schedule <date> <start> [stop]` — Schedule a window\n"
-        "  e.g. `!schedule 2026-05-10 18:00 23:00`\n"
-        "`!cancelschedule <label>` — Cancel a scheduled window\n\n"
-        "**BotNotify**\n"
-        "`!starting`                — Match starting now!\n"
-        "`!upnext <scene> [mins]`   — Announce next scene\n"
-        "`!adbreak [mins]`          — Ad break starting\n"
-        "`!td <message>`            — Tech difficulties alert\n"
-        "`!serveruptime`            — How long server has been up\n"
-        "`!timeuntilstop`           — Time until auto-stop\n"
+@bot.command(name="poll")
+async def poll(ctx, *, question: str):
+    if not has_role(ctx, SPS_TEAM_ROLE):
+        return
+    msg = await ctx.send(f"📊 **{question}**\nReact with ✅ or ❌")
+    await msg.add_reaction("✅")
+    await msg.add_reaction("❌")
+
+
+@bot.command(name="help")
+async def help_command(ctx):
+    roles = user_roles(ctx)
+    intro = (
+        "🤖 I am **SPS Server Bot**. Human-Tournament Relations. "
+        "I am fluent in tournament operations and over six million forms of broadcast coordination. "
+        "I manage the streaming server, monitor the live stream, and keep your crew aligned during events. "
+        "Use the commands below based on your role.\n"
     )
+    sections = [intro]
+
+    # Everyone
+    sections.append(
+        "**Everyone**\n"
+        "`!roll [sides]` — Roll a dice\n"
+        "`!flip` — Flip a coin\n"
+        "`!gg <user>` — Good game shoutout\n"
+        "`!help` — Show this message"
+    )
+
+    # SPS Team
+    if SPS_TEAM_ROLE in roles:
+        sections.append(
+            f"**{SPS_TEAM_ROLE}**\n"
+            "`!serverstatus` — Check if server is running\n"
+            "`!streamstatus` — Check if stream is live\n"
+            "`!viewschedule` — View upcoming server schedule\n"
+            "`!poll <question>` — Create a reaction poll"
+        )
+
+    # EC2User
+    if EC2USER_ROLE in roles:
+        sections.append(
+            f"**{EC2USER_ROLE}**\n"
+            "`!startserver` — Start the server (auto-stops in 6h)"
+        )
+
+    # EC2Admin
+    if EC2ADMIN_ROLE in roles:
+        sections.append(
+            f"**{EC2ADMIN_ROLE}**\n"
+            "`!stopserver` — Stop the server immediately\n"
+            "`!schedule <date> <start> [stop]` — Schedule a window\n"
+            "  e.g. `!schedule 2026-05-10 18:00 23:00`\n"
+            "`!cancelschedule <label>` — Cancel a scheduled window"
+        )
+
+    # BotNotify
+    if BOTNOTIFY_ROLE in roles:
+        sections.append(
+            f"**{BOTNOTIFY_ROLE}**\n"
+            "`!starting` — Match starting now!\n"
+            "`!upnext <scene> [mins]` — Announce next scene\n"
+            "`!adbreak [mins]` — Ad break starting\n"
+            "`!td <message>` — Tech difficulties alert\n"
+            "`!serveruptime` — How long server has been up\n"
+            "`!timeuntilstop` — Time until auto-stop"
+        )
+
+    await ctx.reply("\n\n".join(sections))
 
 # ── Commands: EC2User ─────────────────────────────────────────────────────────
 
@@ -326,7 +374,7 @@ async def start_server(ctx):
             global server_start_time
             server_start_time = datetime.now(EST)
             stop_dt = server_start_time + timedelta(hours=6)
-            await schedule_auto_stop_local(stop_dt)
+            create_autostop_schedule(stop_dt)
             msg = await ctx.reply("⏳ Waiting for server to come online...")
             for _ in range(18):
                 await asyncio.sleep(5)
@@ -348,10 +396,7 @@ async def stop_server(ctx):
         info = get_instance_state()
         if info["state"] != "running":
             return await ctx.reply(f"⚠️ Server is not running (state: **{info['state']}**).")
-        global auto_stop_task
-        if auto_stop_task:
-            auto_stop_task.cancel()
-            auto_stop_task = None
+        delete_autostop_schedule()
         get_ec2_client().stop_instances(InstanceIds=[EC2_INSTANCE_ID])
         await ctx.reply("🛑 Server is shutting down...")
         await post_to_team_chat(f"🔴 Server stopped by **{ctx.author.display_name}**.")
@@ -373,11 +418,8 @@ async def schedule_server(ctx, date: str, start_time: str, stop_time: str = None
             return await ctx.reply("⚠️ Stop time must be after start time.")
 
         label      = start_dt.strftime("%Y%m%d-%H%M")
-        start_name = make_schedule_name(label, "start")
-        stop_name  = make_schedule_name(label, "stop")
-
-        create_ec2_schedule_v2(start_name, start_dt, "start")
-        create_ec2_schedule_v2(stop_name,  stop_dt,  "stop")
+        create_ec2_schedule_v2(make_schedule_name(label, "start"), start_dt, "start")
+        create_ec2_schedule_v2(make_schedule_name(label, "stop"),  stop_dt,  "stop")
 
         await ctx.reply(
             f"✅ Scheduled (`{label}`):\n"
@@ -464,9 +506,9 @@ async def server_uptime(ctx):
 async def time_until_stop(ctx):
     if not has_role(ctx, BOTNOTIFY_ROLE):
         return await ctx.reply("❌ You do not have permission to use this command.")
-    if not server_start_time:
-        return await ctx.reply("⚠️ No stop time recorded this session.")
-    stop_dt   = server_start_time + timedelta(hours=6)
+    stop_dt = get_autostop_time()
+    if not stop_dt:
+        return await ctx.reply("⚠️ No auto-stop scheduled in AWS.")
     remaining = (stop_dt - datetime.now(EST)).total_seconds()
     if remaining <= 0:
         return await ctx.reply("⚠️ Auto-stop should have already triggered.")
