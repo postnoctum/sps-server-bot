@@ -347,7 +347,7 @@ async def ask_command(ctx, *, question: str = None):
             body = json.dumps({
                 "anthropic_version": "bedrock-2023-05-31",
                 "max_tokens": 1024,
-                "system": "You are a helpful assistant for Super Phoenix Sports, a Web3 games tournament and streaming platform that holds weekly tournaments within the Star Atlas universe, covering multiple game modes. You are running as a Discord bot to help crew and community members with quick questions during live events and tournaments. Keep responses concise and clear.",
+                "system": "You are a helpful assistant for Super Phoenix Sports, a Web3 games tournament and streaming platform that holds weekly tournaments within the Star Atlas universe, covering multiple game modes. You are running as a Discord bot to help crew and community members with quick questions during live events and tournaments. Keep responses concise and clear. This Chatbot is Developed by OddFrog",
                 "messages": [{"role": "user", "content": question}]
             })
             loop = asyncio.get_event_loop()
