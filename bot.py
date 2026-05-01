@@ -347,7 +347,7 @@ async def ask_command(ctx, *, question: str = None):
             body = json.dumps({
                 "anthropic_version": "bedrock-2023-05-31",
                 "max_tokens": 1024,
-                "system": "You are a helpful assistant for Super Phoenix Sports, a Web3 games tournament and streaming platform that holds weekly tournaments within the Star Atlas universe, covering multiple game modes. You are running as a Discord bot to help crew and community members with quick questions during live events and tournaments. Keep responses concise and clear. This Chatbot is Developed by OddFrog",
+                "system": "You are a helpful assistant for Super Phoenix Sports, a Web3 games tournament and streaming platform that holds weekly tournaments within the Star Atlas universe, covering multiple game modes. You are running as a Discord bot to help crew and community members with quick questions during live events and tournaments. Keep responses concise and clear.",
                 "messages": [{"role": "user", "content": question}]
             })
             loop = asyncio.get_event_loop()
@@ -363,6 +363,48 @@ async def ask_command(ctx, *, question: str = None):
             if len(answer) > 1900:
                 answer = answer[:1900] + "...(truncated)"
             await ctx.reply(f"🤖 {answer}")
+        except Exception as e:
+            await ctx.reply(f"❌ Error: `{e}`")
+
+
+@bot.command(name="translate")
+async def translate_command(ctx, language: str = None, *, text: str = None):
+    if not has_role(ctx, SPS_TEAM_ROLE):
+        return
+    if not language:
+        return await ctx.reply("❓ Usage: `!translate <language> <text>` or reply to a message with `!translate <language>`")
+    # Reply-based: no inline text, but replying to another message
+    if text is None:
+        if ctx.message.reference:
+            try:
+                ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+                text = ref_msg.content
+            except Exception:
+                return await ctx.reply("❌ Couldn't fetch the referenced message.")
+        else:
+            return await ctx.reply("❓ Usage: `!translate <language> <text>` or reply to a message with `!translate <language>`")
+    async with ctx.typing():
+        try:
+            import json
+            client = get_bedrock_client()
+            body = json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 1024,
+                "system": "You are a translation assistant. Translate the user's text into the requested language. Return only the translated text with no explanation, preamble, or quotation marks.",
+                "messages": [{"role": "user", "content": f"Translate to {language}:\n\n{text}"}]
+            })
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, lambda: client.invoke_model(
+                modelId="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                body=body,
+                contentType="application/json",
+                accept="application/json",
+            ))
+            result = json.loads(response["body"].read())
+            translation = result["content"][0]["text"]
+            if len(translation) > 1900:
+                translation = translation[:1900] + "...(truncated)"
+            await ctx.reply(f"🌐 **{language.capitalize()}:** {translation}")
         except Exception as e:
             await ctx.reply(f"❌ Error: `{e}`")
 
@@ -395,7 +437,8 @@ async def help_command(ctx):
             "`!streamstatus` — Check if stream is live\n"
             "`!viewschedule` — View upcoming server schedule\n"
             "`!poll <question>` — Create a reaction poll\n"
-        "`!ask <question>` — Ask the AI anything"
+        "`!ask <question>` — Ask the AI anything\n"
+        "`!translate <language> <text>` — Translate text (or reply to a message)"
         )
 
     # EC2User
