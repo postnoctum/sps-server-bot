@@ -13,25 +13,30 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DISCORD_TOKEN       = os.getenv("DISCORD_TOKEN")
-AWS_REGION          = os.getenv("AWS_REGION", "us-east-1")
-EC2_INSTANCE_ID     = os.getenv("EC2_INSTANCE_ID")
+
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+EC2_INSTANCE_ID = os.getenv("EC2_INSTANCE_ID")
 YOUTUBE_CHANNEL_URL = os.getenv("YOUTUBE_CHANNEL_URL", "")
-SCHEDULER_ROLE_ARN  = os.getenv("SCHEDULER_ROLE_ARN", "arn:aws:iam::853027285668:role/EventBridgeEC2Role")
-
-TEAM_CHAT_CHANNEL     = "team-chat"
+SCHEDULER_ROLE_ARN = os.getenv("SCHEDULER_ROLE_ARN", "arn:aws:iam::853027285668:role/EventBridgeEC2Role")
+TEAM_CHAT_CHANNEL = "team-chat"
 STREAMERGENCY_CHANNEL = "streamergency"
-
-SPS_TEAM_ROLE  = "SPS Team"
-EC2USER_ROLE   = os.getenv("START_ROLE", "EC2User")
-EC2ADMIN_ROLE  = os.getenv("STOP_ROLE", "EC2Admin")
+SPS_TEAM_ROLE = "SPS Team"
+EC2USER_ROLE = os.getenv("START_ROLE", "EC2User")
+EC2ADMIN_ROLE = os.getenv("STOP_ROLE", "EC2Admin")
 BOTNOTIFY_ROLE = "BotNotify"
-
 EST = ZoneInfo("America/New_York")
 AUTOSTOP_NAME = "sps-autostop"
 
+KYBER_EC2_INSTANCE_ID = os.getenv("KYBER_EC2_INSTANCE_ID")
+KYBER_EC2_IP = os.getenv("KYBER_EC2_IP")
+KYBER_PEM_KEY = os.getenv("KYBER_PEM_KEY")
+KYBER_EC2_USER = "ubuntu"
+
 # Runtime state
 server_start_time = None
+kyber_start_time = None
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
@@ -162,13 +167,13 @@ async def check_youtube_live(channel_url: str) -> dict:
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers) as resp:
             html = await resp.text()
-    is_live = '"isLive":true' in html or 'isLiveBroadcast' in html
-    title = None
-    if is_live:
-        match = re.search(r'"title":"([^"]+)"', html)
-        if match:
-            title = match.group(1)
-    return {"live": is_live, "title": title}
+            is_live = '"isLive":true' in html or 'isLiveBroadcast' in html
+            title = None
+            if is_live:
+                match = re.search(r'"title":"([^"]+)"', html)
+                if match:
+                    title = match.group(1)
+            return {"live": is_live, "title": title}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -200,7 +205,7 @@ async def post_to_streamergency(msg):
 def format_duration(seconds):
     seconds = int(seconds)
     h, rem = divmod(seconds, 3600)
-    m, s   = divmod(rem, 60)
+    m, s = divmod(rem, 60)
     if h:
         return f"{h}h {m}m"
     return f"{m}m {s}s"
@@ -234,7 +239,7 @@ async def roll_dice(ctx, sides: int = 6):
 @bot.command(name="flip")
 async def coin_flip(ctx):
     result = random.choice(["Heads", "Tails"])
-    emoji  = "🟡" if result == "Heads" else "⚫"
+    emoji = "🟡" if result == "Heads" else "⚫"
     await ctx.reply(f"{emoji} **{result}!**")
 
 @bot.command(name="gg")
@@ -255,7 +260,6 @@ async def server_status(ctx):
     except Exception as e:
         await ctx.reply(f"❌ Error: `{e}`")
 
-
 @bot.command(name="streamstatus")
 async def stream_status(ctx):
     if not has_role(ctx, SPS_TEAM_ROLE):
@@ -273,43 +277,36 @@ async def stream_status(ctx):
     except Exception as e:
         await ctx.reply(f"❌ Error: `{e}`")
 
-
 @bot.command(name="viewschedule")
 async def view_schedule(ctx):
     if not has_role(ctx, SPS_TEAM_ROLE):
         return
     try:
         schedules = list_sps_schedules()
-        # Filter out autostop — it's shown in !timeuntilstop
-        schedules = [s for s in schedules if not s["Name"].startswith("sps-autostop")]
+        schedules = [s for s in schedules if not s["Name"].startswith("sps-autostop") and not s["Name"].startswith("sps-kyber")]
         if not schedules:
             return await ctx.reply("📅 No upcoming scheduled windows.")
-
         pairs = {}
         for s in schedules:
-            name  = s["Name"]
+            name = s["Name"]
             parts = name.split("-", 2)
             if len(parts) < 3:
                 continue
             action = parts[1]
-            label  = parts[2]
+            label = parts[2]
             if label not in pairs:
                 pairs[label] = {}
             pairs[label][action] = s
-
         if not pairs:
             return await ctx.reply("📅 No upcoming scheduled windows.")
-
         lines = ["**📅 Upcoming Server Schedule (EST)**"]
         for label, p in sorted(pairs.items()):
             start_str = fmt_schedule_time(make_schedule_name(label, "start")) if p.get("start") else "—"
-            stop_str  = fmt_schedule_time(make_schedule_name(label, "stop"))  if p.get("stop")  else "—"
+            stop_str = fmt_schedule_time(make_schedule_name(label, "stop")) if p.get("stop") else "—"
             lines.append(f"`{label}` ▶️ {start_str} → ⏹️ {stop_str}")
-
         await ctx.reply("\n".join(lines))
     except Exception as e:
         await ctx.reply(f"❌ Error: `{e}`")
-
 
 @bot.command(name="poll")
 async def poll(ctx, *, question: str):
@@ -332,7 +329,6 @@ async def poll(ctx, *, question: str):
         msg = await ctx.send("\n".join(lines))
         for i in range(len(options)):
             await msg.add_reaction(number_emojis[i])
-
 
 @bot.command(name="ask")
 async def ask_command(ctx, *, question: str = None):
@@ -359,13 +355,11 @@ async def ask_command(ctx, *, question: str = None):
             ))
             result = json.loads(response["body"].read())
             answer = result["content"][0]["text"]
-            # Discord has a 2000 char limit
             if len(answer) > 1900:
                 answer = answer[:1900] + "...(truncated)"
             await ctx.reply(f"🤖 {answer}")
         except Exception as e:
             await ctx.reply(f"❌ Error: `{e}`")
-
 
 @bot.command(name="translate")
 async def translate_command(ctx, language: str = None, *, text: str = None):
@@ -373,7 +367,6 @@ async def translate_command(ctx, language: str = None, *, text: str = None):
         return
     if not language:
         return await ctx.reply("❓ Usage: `!translate <language> <text>` or reply to a message with `!translate <language>`")
-    # Reply-based: no inline text, but replying to another message
     if text is None:
         if ctx.message.reference:
             try:
@@ -408,7 +401,6 @@ async def translate_command(ctx, language: str = None, *, text: str = None):
         except Exception as e:
             await ctx.reply(f"❌ Error: `{e}`")
 
-
 @bot.command(name="spshelp")
 async def help_command(ctx):
     roles = user_roles(ctx)
@@ -419,8 +411,6 @@ async def help_command(ctx):
         "Use the commands below based on your role.\n"
     )
     sections = [intro]
-
-    # Everyone
     sections.append(
         "**Everyone**\n"
         "`!roll [sides]` — Roll a dice\n"
@@ -428,37 +418,32 @@ async def help_command(ctx):
         "`!gg <user>` — Good game shoutout\n"
         "`!spshelp` — Show this message"
     )
-
-    # SPS Team
     if SPS_TEAM_ROLE in roles:
         sections.append(
             f"**{SPS_TEAM_ROLE}**\n"
-            "`!serverstatus` — Check if server is running\n"
+            "`!serverstatus` — Check if stream server is running\n"
             "`!streamstatus` — Check if stream is live\n"
             "`!viewschedule` — View upcoming server schedule\n"
             "`!poll <question>` — Create a reaction poll\n"
-        "`!ask <question>` — Ask the AI anything\n"
-        "`!translate <language> <text>` — Translate text (or reply to a message)"
+            "`!ask <question>` — Ask the AI anything\n"
+            "`!translate <language> <text>` — Translate text (or reply to a message)"
         )
-
-    # EC2User
     if EC2USER_ROLE in roles:
         sections.append(
             f"**{EC2USER_ROLE}**\n"
-            "`!startserver` — Start the server (auto-stops in 6h)"
+            "`!startserver` — Start the stream server (auto-stops in 6h)\n"
+            "`!kyberstart` — Start the BF2 Kyber server (auto-stops in 6h)\n"
+            "`!kyberstatus` — Check Kyber server status"
         )
-
-    # EC2Admin
     if EC2ADMIN_ROLE in roles:
         sections.append(
             f"**{EC2ADMIN_ROLE}**\n"
-            "`!stopserver` — Stop the server immediately\n"
+            "`!stopserver` — Stop the stream server immediately\n"
+            "`!kyberstop` — Stop the BF2 Kyber server immediately\n"
             "`!schedule <date> <start> [stop]` — Schedule a window\n"
-            "  e.g. `!schedule 2026-05-10 18:00 23:00`\n"
+            " e.g. `!schedule 2026-05-10 18:00 23:00`\n"
             "`!cancelschedule <label>` — Cancel a scheduled window"
         )
-
-    # BotNotify
     if BOTNOTIFY_ROLE in roles:
         sections.append(
             f"**{BOTNOTIFY_ROLE}**\n"
@@ -466,10 +451,9 @@ async def help_command(ctx):
             "`!upnext <scene> [mins]` — Announce next scene\n"
             "`!adbreak [mins]` — Ad break starting\n"
             "`!td <message>` — Tech difficulties alert\n"
-            "`!serveruptime` — How long server has been up\n"
-            "`!timeuntilstop` — Time until auto-stop"
+            "`!serveruptime` — How long stream server has been up\n"
+            "`!timeuntilstop` — Time until stream server auto-stop"
         )
-
     await ctx.reply("\n\n".join(sections))
 
 # ── Commands: EC2User ─────────────────────────────────────────────────────────
@@ -521,28 +505,24 @@ async def stop_server(ctx):
     except Exception as e:
         await ctx.reply(f"❌ Error: `{e}`")
 
-
 @bot.command(name="schedule")
 async def schedule_server(ctx, date: str, start_time: str, stop_time: str = None):
     if not has_role(ctx, EC2ADMIN_ROLE):
         return await ctx.reply("❌ You do not have permission to use this command.")
     try:
         start_dt = datetime.strptime(f"{date} {start_time}", "%Y-%m-%d %H:%M").replace(tzinfo=EST)
-        stop_dt  = datetime.strptime(f"{date} {stop_time}", "%Y-%m-%d %H:%M").replace(tzinfo=EST) if stop_time else start_dt + timedelta(hours=6)
-
+        stop_dt = datetime.strptime(f"{date} {stop_time}", "%Y-%m-%d %H:%M").replace(tzinfo=EST) if stop_time else start_dt + timedelta(hours=6)
         if start_dt < datetime.now(EST):
             return await ctx.reply("⚠️ Start time is in the past.")
         if stop_dt <= start_dt:
             return await ctx.reply("⚠️ Stop time must be after start time.")
-
-        label      = start_dt.strftime("%Y%m%d-%H%M")
+        label = start_dt.strftime("%Y%m%d-%H%M")
         create_ec2_schedule_v2(make_schedule_name(label, "start"), start_dt, "start")
-        create_ec2_schedule_v2(make_schedule_name(label, "stop"),  stop_dt,  "stop")
-
+        create_ec2_schedule_v2(make_schedule_name(label, "stop"), stop_dt, "stop")
         await ctx.reply(
             f"✅ Scheduled (`{label}`):\n"
             f"▶️ Start: {start_dt.strftime('%a %b %d, %I:%M %p EST')}\n"
-            f"⏹️ Stop:  {stop_dt.strftime('%I:%M %p EST')}"
+            f"⏹️ Stop: {stop_dt.strftime('%I:%M %p EST')}"
         )
         await post_to_team_chat(
             f"📅 Server scheduled by **{ctx.author.display_name}** (`{label}`):\n"
@@ -552,7 +532,6 @@ async def schedule_server(ctx, date: str, start_time: str, stop_time: str = None
         await ctx.reply("⚠️ Invalid format. Use: `!schedule YYYY-MM-DD HH:MM [HH:MM]`\nExample: `!schedule 2026-05-10 18:00 23:00`")
     except Exception as e:
         await ctx.reply(f"❌ Error creating schedule: `{e}`")
-
 
 @bot.command(name="cancelschedule")
 async def cancel_schedule(ctx, label: str):
@@ -575,7 +554,6 @@ async def match_starting(ctx):
     await post_to_streamergency(f"⚔️ **Match starting now!** (from {ctx.author.display_name})")
     await ctx.reply("✅ Posted to #streamergency.")
 
-
 @bot.command(name="upnext")
 async def up_next(ctx, scene: str, minutes: int = None):
     if not has_role(ctx, BOTNOTIFY_ROLE):
@@ -586,7 +564,6 @@ async def up_next(ctx, scene: str, minutes: int = None):
         msg = f"🎬 **Up next: {scene}** — starting now! (from {ctx.author.display_name})"
     await post_to_streamergency(msg)
     await ctx.reply("✅ Posted to #streamergency.")
-
 
 @bot.command(name="adbreak")
 async def ad_break(ctx, minutes: int = None):
@@ -599,7 +576,6 @@ async def ad_break(ctx, minutes: int = None):
     await post_to_streamergency(msg)
     await ctx.reply("✅ Posted to #streamergency.")
 
-
 @bot.command(name="td")
 async def tech_difficulties(ctx, *, message: str):
     if not has_role(ctx, BOTNOTIFY_ROLE):
@@ -609,7 +585,6 @@ async def tech_difficulties(ctx, *, message: str):
     )
     await ctx.reply("✅ Posted to #streamergency.")
 
-
 @bot.command(name="serveruptime")
 async def server_uptime(ctx):
     if not has_role(ctx, BOTNOTIFY_ROLE):
@@ -618,7 +593,6 @@ async def server_uptime(ctx):
         return await ctx.reply("⚠️ No uptime recorded this session — server may have been started before the bot.")
     elapsed = (datetime.now(EST) - server_start_time).total_seconds()
     await ctx.reply(f"⏱️ Server has been running for **{format_duration(elapsed)}**.")
-
 
 @bot.command(name="timeuntilstop")
 async def time_until_stop(ctx):
@@ -631,6 +605,197 @@ async def time_until_stop(ctx):
     if remaining <= 0:
         return await ctx.reply("⚠️ Auto-stop should have already triggered.")
     await ctx.reply(f"⏳ Server auto-stops in **{format_duration(remaining)}** (at {stop_dt.strftime('%I:%M %p EST')}).")
+
+# ── Kyber Helpers ─────────────────────────────────────────────────────────────
+
+def get_kyber_ec2_client():
+    return boto3.client(
+        "ec2",
+        region_name=AWS_REGION,
+        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    )
+
+def get_kyber_instance_state() -> dict:
+    ec2 = get_kyber_ec2_client()
+    resp = ec2.describe_instances(InstanceIds=[KYBER_EC2_INSTANCE_ID])
+    instance = resp["Reservations"][0]["Instances"][0]
+    return {
+        "state": instance["State"]["Name"],
+        "public_ip": instance.get("PublicIpAddress"),
+    }
+
+async def ssh_run(command: str) -> str:
+    import paramiko
+    import io
+    loop = asyncio.get_event_loop()
+
+    def _run():
+        pem_key = KYBER_PEM_KEY.replace("\\n", "\n")
+        key = paramiko.RSAKey.from_private_key(io.StringIO(pem_key))
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(KYBER_EC2_IP, username=KYBER_EC2_USER, pkey=key, timeout=15)
+        _, stdout, stderr = client.exec_command(command)
+        out = stdout.read().decode().strip()
+        err = stderr.read().decode().strip()
+        client.close()
+        return out or err
+
+    return await loop.run_in_executor(None, _run)
+
+def create_kyber_autostop_schedule(stop_dt: datetime):
+    name = "sps-kyber-autostop"
+    try:
+        get_scheduler_client().delete_schedule(Name=name)
+    except Exception:
+        pass
+    scheduler = get_scheduler_client()
+    dt_utc = stop_dt.astimezone(ZoneInfo("UTC"))
+    schedule_expr = f"at({dt_utc.strftime('%Y-%m-%dT%H:%M:%S')})"
+    scheduler.create_schedule(
+        Name=name,
+        ScheduleExpression=schedule_expr,
+        ScheduleExpressionTimezone="UTC",
+        FlexibleTimeWindow={"Mode": "OFF"},
+        Target={
+            "Arn": "arn:aws:scheduler:::aws-sdk:ec2:stopInstances",
+            "RoleArn": SCHEDULER_ROLE_ARN,
+            "Input": f'{{"InstanceIds":["{KYBER_EC2_INSTANCE_ID}"]}}',
+        },
+        ActionAfterCompletion="DELETE",
+    )
+
+# ── Commands: Kyber ───────────────────────────────────────────────────────────
+
+@bot.command(name="kyberstart")
+async def kyber_start(ctx):
+    if not has_role(ctx, EC2USER_ROLE):
+        return await ctx.reply("❌ You do not have permission to use this command.")
+
+    await ctx.reply("🔍 Checking Kyber server status...")
+    try:
+        info = get_kyber_instance_state()
+        state = info["state"]
+
+        if state == "running":
+            return await ctx.reply("✅ Kyber server is **already running**!")
+        if state in ("pending", "stopping", "shutting-down"):
+            return await ctx.reply(f"⚠️ Kyber server is currently **{state}** — try again in a moment.")
+
+        await ctx.reply("🚀 Starting Kyber server... this may take 60–90 seconds.")
+        get_kyber_ec2_client().start_instances(InstanceIds=[KYBER_EC2_INSTANCE_ID])
+
+        global kyber_start_time
+        kyber_start_time = datetime.now(EST)
+        stop_dt = kyber_start_time + timedelta(hours=6)
+        create_kyber_autostop_schedule(stop_dt)
+
+        msg = await ctx.reply("⏳ Waiting for Kyber server to come online...")
+
+        for _ in range(24):
+            await asyncio.sleep(5)
+            if get_kyber_instance_state()["state"] == "running":
+                break
+
+        # Give Docker time to auto-start the container
+        await asyncio.sleep(30)
+
+        # Verify/start the container
+        try:
+            result = await ssh_run("sudo docker ps --filter name=kyber-server --format '{{.Status}}'")
+            if "Up" not in result:
+                await ssh_run("sudo docker start kyber-server")
+                await asyncio.sleep(10)
+                result = await ssh_run("sudo docker ps --filter name=kyber-server --format '{{.Status}}'")
+        except Exception as e:
+            result = f"SSH check failed: {e}"
+
+        container_status = "🟢 Container running" if "Up" in result else f"⚠️ Container status: {result}"
+
+        await msg.edit(content=(
+            f"✅ **Kyber BF2 server is online!**\n"
+            f"🎮 Server: `Super Phoenix Sports`\n"
+            f"🔒 Password: `SPS_JULY`\n"
+            f"{container_status}\n"
+            f"⏹️ Auto-stop at {stop_dt.strftime('%I:%M %p EST')}"
+        ))
+        await post_to_team_chat(
+            f"🎮 Kyber BF2 server started by **{ctx.author.display_name}**. "
+            f"Auto-stop at {stop_dt.strftime('%I:%M %p EST')}."
+        )
+
+    except Exception as e:
+        await ctx.reply(f"❌ Error: `{e}`")
+
+
+@bot.command(name="kyberstop")
+async def kyber_stop(ctx):
+    if not has_role(ctx, EC2ADMIN_ROLE):
+        return await ctx.reply("❌ You do not have permission to use this command.")
+
+    try:
+        info = get_kyber_instance_state()
+        if info["state"] != "running":
+            return await ctx.reply(f"⚠️ Kyber server is not running (state: **{info['state']}**).")
+
+        try:
+            await ssh_run("sudo docker stop kyber-server")
+        except Exception:
+            pass
+
+        try:
+            get_scheduler_client().delete_schedule(Name="sps-kyber-autostop")
+        except Exception:
+            pass
+
+        get_kyber_ec2_client().stop_instances(InstanceIds=[KYBER_EC2_INSTANCE_ID])
+        await ctx.reply("🛑 Kyber BF2 server is shutting down...")
+        await post_to_team_chat(f"🔴 Kyber BF2 server stopped by **{ctx.author.display_name}**.")
+
+    except Exception as e:
+        await ctx.reply(f"❌ Error: `{e}`")
+
+
+@bot.command(name="kyberstatus")
+async def kyber_status(ctx):
+    if not has_role(ctx, EC2USER_ROLE):
+        return await ctx.reply("❌ You do not have permission to use this command.")
+
+    try:
+        info = get_kyber_instance_state()
+        state = info["state"]
+        icons = {"running": "🟢", "stopped": "🔴", "pending": "🟡", "stopping": "🟠"}
+
+        if state != "running":
+            return await ctx.reply(f"{icons.get(state, '⚪')} Kyber server is **{state}**")
+
+        try:
+            result = await ssh_run("sudo docker ps --filter name=kyber-server --format '{{.Status}}'")
+            container = "🟢 Container running" if "Up" in result else "🔴 Container not running"
+        except Exception:
+            container = "⚠️ Could not check container"
+
+        try:
+            detail = get_scheduler_client().get_schedule(Name="sps-kyber-autostop")
+            expr = detail.get("ScheduleExpression", "")
+            m = re.search(r'at\((.+?)\)', expr)
+            stop_str = ""
+            if m:
+                stop_dt = datetime.fromisoformat(m.group(1)).replace(tzinfo=ZoneInfo("UTC")).astimezone(EST)
+                remaining = (stop_dt - datetime.now(EST)).total_seconds()
+                stop_str = f"\n⏹️ Auto-stop in **{format_duration(remaining)}** ({stop_dt.strftime('%I:%M %p EST')})"
+        except Exception:
+            stop_str = ""
+
+        await ctx.reply(
+            f"🟢 Kyber BF2 server is **running**\n"
+            f"🎮 Server: `Super Phoenix Sports` | Password: `SPS_JULY`\n"
+            f"{container}{stop_str}"
+        )
+
+    except Exception as e:
+        await ctx.reply(f"❌ Error: `{e}`")
 
 
 bot.run(DISCORD_TOKEN)
